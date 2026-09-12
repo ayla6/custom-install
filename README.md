@@ -67,6 +67,15 @@ python3 -m custominstall -b boot9.bin -m movable.sed --sd /Volumes/GM9SD file.ci
 python3 -m custominstall -b boot9.bin -m movable.sed --sd /media/GM9SD file.cia file2.cia
 ```
 
+## Supported formats
+Along with CIA files, cart dumps (`.cci`/`.3ds`), standalone NCCH files (`.cxi`/`.app`) and the
+Z3DS-compressed versions of these formats (`.zcci`, `.zcxi`, `.zcia`, as used by Azahar) can be
+installed. They are converted on the fly the same way as CCI to CIA converters: each NCCH
+partition becomes an unencrypted content, and the SD application flag is set in the exheader.
+
+Cart dumps with seed crypto need the matching seed in seeddb.bin.
+
+
 ## GUI
 A GUI is provided to make the process easier.
 

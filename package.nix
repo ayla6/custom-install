@@ -11,6 +11,7 @@
   tkinter,
   setuptools,
   events,
+  zstandard,
   stdenv,
   save3ds,
 
@@ -52,6 +53,7 @@ buildPythonApplication rec {
       pycryptodomex
       setuptools
       events
+      zstandard
     ]
     ++ lib.optionals (withGUI) [
       tkinter

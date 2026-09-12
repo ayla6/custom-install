@@ -29,14 +29,15 @@ if TYPE_CHECKING:
 
 from events import Events
 
-from pyctr.crypto import CryptoEngine, Keyslot, load_seeddb, get_seed
+from pyctr.crypto import CryptoEngine, Keyslot, MissingSeedError, load_seeddb, get_seed
 from pyctr.type.cdn import CDNReader, CDNError
 from pyctr.type.cia import CIAReader, CIAError
-from pyctr.type.ncch import NCCHSection
+from pyctr.type.ncch import NCCHSection, NCCHError, NCCHSeedError
 from pyctr.type.tmd import TitleMetadataError
 from pyctr.util import roundup
 
 from . import __version__
+from .formats import get_reader as get_title_reader, UnsupportedFormatError
 
 if platform == 'msys':
     platform = 'win32'
@@ -251,18 +252,7 @@ class CustomInstall:
 
     @staticmethod
     def get_reader(path: 'Union[PathLike, bytes, str]'):
-        if isdir(path):
-            # try the default tmd file
-            reader = CDNReader(join(path, 'tmd'))
-        else:
-            try:
-                reader = CIAReader(path)
-            except CIAError:
-                # if there was an error with parsing the CIA header,
-                # the file would be tried in CDNReader next (assuming it's a tmd)
-                # any other error should be propagated to the caller
-                reader = CDNReader(path)
-        return reader
+        return get_title_reader(path)
 
     def prepare_titles(self, paths: 'List[PathLike]'):
         if self.seeddb:
@@ -274,10 +264,24 @@ class CustomInstall:
             try:
                 reader = self.get_reader(path)
             except (CIAError, CDNError, TitleMetadataError):
-                self.log(f"Couldn't read {path}, likely corrupt or not a CIA or CDN title")
+                self.log(f"Couldn't read {path}, likely corrupt or not a supported title")
                 continue
-            if reader.tmd.title_id.startswith('00048'):  # DSiWare
-                self.log(f'Skipping {reader.tmd.title_id} - DSiWare is not supported')
+            except UnsupportedFormatError as e:
+                self.log(f"Couldn't read {path}: {e}")
+                continue
+            except (MissingSeedError, NCCHSeedError):
+                self.log(f'{path} requires a seed; a latest seeddb.bin is required')
+                continue
+            except NCCHError as e:
+                self.log(f"Couldn't read {path}: {e}")
+                continue
+            # the title id is directly available on readers for other formats,
+            # without building the synthetic TMD
+            title_id = getattr(reader, 'title_id', None)
+            if title_id is None:
+                title_id = reader.tmd.title_id
+            if title_id.startswith('00048'):  # DSiWare
+                self.log(f'Skipping {title_id} - DSiWare is not supported')
                 continue
             readers.append((reader, path))
         self.readers = readers
@@ -701,8 +705,9 @@ class CustomInstall:
 
 
 def main():
-    parser = ArgumentParser(description='Install a CIA to the SD card for a Nintendo 3DS system.')
-    parser.add_argument('cia', help='CIA files', nargs='+')
+    parser = ArgumentParser(description='Install titles to the SD card for a Nintendo 3DS system.')
+    parser.add_argument('cia', help='title files (CIA, CCI/.3ds cart dump, CXI/.app, and '
+                                    'Z3DS-compressed versions like .zcci)', nargs='+')
     parser.add_argument('-m', '--movable', help='movable.sed file', required=True)
     parser.add_argument('-b', '--boot9', help='boot9 file')
     parser.add_argument('-s', '--seeddb', help='seeddb file')

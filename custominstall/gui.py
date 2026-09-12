@@ -23,10 +23,12 @@ from pyctr.crypto.engine import b9_paths
 from pyctr.util import config_dirs
 from pyctr.type.cdn import CDNError
 from pyctr.type.cia import CIAError
+from pyctr.type.ncch import NCCHSeedError
 from pyctr.type.tmd import TitleMetadataError
 
 from . import __version__
 from .__main__ import CustomInstall, load_cifinish, InvalidCIFinishError, InstallStatus, save3ds_fuse_path
+from .formats import UnsupportedFormatError
 
 if TYPE_CHECKING:
     from os import PathLike
@@ -391,8 +393,13 @@ class CustomInstallGUI(ttk.Frame):
         titlelist_buttons.grid(row=1, column=0)
 
         def add_cias_callback():
-            files = fd.askopenfilenames(parent=parent, title='Select CIA files', filetypes=[('CIA files', '*.cia')],
-                                        initialdir=file_parent)
+            files = fd.askopenfilenames(parent=parent, title='Select title files', filetypes=[
+                ('Supported title files', ('*.cia', '*.zcia', '*.cci', '*.3ds', '*.zcci', '*.cxi', '*.app', '*.zcxi')),
+                ('CIA files', ('*.cia', '*.zcia')),
+                ('Cart dumps', ('*.cci', '*.3ds', '*.zcci')),
+                ('NCCH files', ('*.cxi', '*.app', '*.zcxi')),
+                ('All files', ('*',)),
+            ], initialdir=file_parent)
             results = {}
             for f in files:
                 success, reason = self.add_cia(f)
@@ -404,7 +411,7 @@ class CustomInstallGUI(ttk.Frame):
                 title_read_fail_window.focus()
             self.sort_treeview()
 
-        add_cias = ttk.Button(titlelist_buttons, text='Add CIAs', command=add_cias_callback)
+        add_cias = ttk.Button(titlelist_buttons, text='Add titles', command=add_cias_callback)
         add_cias.grid(row=0, column=0)
 
         def add_cdn_callback():
@@ -424,11 +431,11 @@ class CustomInstallGUI(ttk.Frame):
         add_cdn.grid(row=0, column=1)
 
         def add_dirs_callback():
-            d = fd.askdirectory(parent=parent, title='Select folder containing CIA files', initialdir=file_parent)
+            d = fd.askdirectory(parent=parent, title='Select folder containing title files', initialdir=file_parent)
             if d:
                 results = {}
                 for f in scandir(d):
-                    if f.name.lower().endswith('.cia'):
+                    if f.name.lower().endswith(('.cia', '.zcia', '.cci', '.3ds', '.zcci', '.cxi', '.app', '.zcxi')):
                         success, reason = self.add_cia(f.path)
                         if not success:
                             results[f] = reason
@@ -551,13 +558,20 @@ class CustomInstallGUI(ttk.Frame):
         try:
             reader = CustomInstall.get_reader(path)
         except (CIAError, CDNError, TitleMetadataError):
-            return False, 'Failed to read as a CIA or CDN title, probably corrupt'
-        except MissingSeedError:
+            return False, 'Failed to read as a title, probably corrupt'
+        except UnsupportedFormatError as e:
+            return False, f'Failed to read as a title: {e}'
+        except (MissingSeedError, NCCHSeedError):
             return False, 'Latest seeddb.bin is required, check the README for details'
         except Exception as e:
             return False, f'Exception occurred: {type(e).__name__}: {e}'
 
-        if reader.tmd.title_id.startswith('00048'):
+        # the title id is directly available on readers for other formats,
+        # without building the synthetic TMD
+        title_id = getattr(reader, 'title_id', None)
+        if title_id is None:
+            title_id = reader.tmd.title_id
+        if title_id.startswith('00048'):
             return False, 'DSiWare is not supported'
         try:
             title_name = reader.contents[0].exefs.icon.get_app_title().short_desc
