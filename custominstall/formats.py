@@ -102,12 +102,14 @@ def sniff_format(f) -> 'str | None':
     return None
 
 
-def decompress_z3ds(f, out):
+def decompress_z3ds(f, out, progress=None):
     """Decompress a Z3DS file (a seekable zstd stream) into a file object.
 
     The stream is a series of zstd frames followed by a seek table. Decompression
     stops once the size stored in the header is reached, so the seek table is
     never touched.
+
+    progress, if given, is called as progress(done, total, stage) after each chunk.
     """
     header = Z3DSFileHeader(f.read(0x20))
     if header.version != 1:
@@ -140,6 +142,8 @@ def decompress_z3ds(f, out):
                 data = data[:header.uncompressed_size - total]
             out.write(data)
             total += len(data)
+            if progress is not None:
+                progress(total, header.uncompressed_size, 'decompressing')
         if obj.eof:
             # hold any bytes after this frame (start of the next one) for the next pass
             pending = obj.unused_data
@@ -270,12 +274,13 @@ class TitleReader:
     """
 
     def __init__(self, title_id: str, contents: 'dict[int, NCCHReader]', sizes: 'dict[int, int]',
-                 open_partition: 'callable'):
+                 open_partition: 'callable', progress=None):
         self.title_id = title_id.lower()
         """Title ID, available without hashing the contents."""
         self.contents = contents
         self._sizes = sizes
         self._open_partition = open_partition
+        self._progress = progress
         self._tmd = None
 
         self._patches = {}
@@ -285,7 +290,7 @@ class TitleReader:
             self._patches[0], self._save_size = _patched_prefix(first)
 
     @classmethod
-    def from_cci(cls, cci: CCIReader) -> 'TitleReader':
+    def from_cci(cls, cci: CCIReader, progress=None) -> 'TitleReader':
         """Use partitions 0-2 (application, manual, download play) of a CCI.
 
         The other partitions (update data and unused slots) are dropped, like
@@ -300,26 +305,48 @@ class TitleReader:
             region = cci.sections.get(section)
             if region is None:
                 continue
-            ncch = cci.contents.get(section)
-            if ncch is None:
-                ncch = NCCHReader(cci.open_raw_section(section))
+            # ExeFS/RomFS parsing is not needed to install, and fails on some
+            # perfectly fine roms, so sections are only loaded lazily for the
+            # first partition (which provides the title name for the GUI).
+            ncch = NCCHReader(cci.open_raw_section(section), load_sections=False)
             contents[int(section)] = ncch
             sizes[int(section)] = region.size
 
-        return cls(cci.media_id, contents, sizes, lambda cindex: cci.open_raw_section(CCISection(cindex)))
+        reader = cls(cci.media_id, contents, sizes,
+                     lambda cindex: cci.open_raw_section(CCISection(cindex)), progress=progress)
+        reader._load_first_partition_sections()
+        return reader
 
     @classmethod
-    def from_ncch(cls, ncch: NCCHReader, open_stream: 'callable') -> 'TitleReader':
+    def from_ncch(cls, ncch: NCCHReader, open_stream: 'callable', progress=None) -> 'TitleReader':
         """Use a standalone NCCH file (.cxi/.app) as the only content."""
         with open_stream() as f:
             f.seek(0, 2)
             size = f.tell()
-        return cls(ncch.program_id, {0: ncch}, {0: size}, lambda cindex: open_stream())
+        reader = cls(ncch.program_id, {0: ncch}, {0: size}, lambda cindex: open_stream(), progress=progress)
+        reader._load_first_partition_sections()
+        return reader
+
+    def _load_first_partition_sections(self):
+        """Load ExeFS/RomFS of the first partition for the title name shown in the GUI.
+
+        This is optional: it fails on some perfectly installable roms (and the
+        GUI already falls back to the title ID in that case), so any error is
+        ignored here.
+        """
+        first = self.contents.get(0)
+        if first is not None and first.exefs is None and first.romfs is None:
+            try:
+                first.load_sections()
+            except Exception:
+                pass
 
     @property
     def tmd(self) -> TitleMetadataReader:
         """A synthetic TMD. Built on first use, since content hashes are needed."""
         if self._tmd is None:
+            total = sum(self._sizes.values())
+            done = 0
             records = []
             for cindex in sorted(self._sizes):
                 content_hash = sha256()
@@ -330,7 +357,10 @@ class TitleReader:
                         if not data:
                             raise UnsupportedFormatError(f'content {cindex} is truncated')
                         content_hash.update(data)
+                        done += len(data)
                         left -= len(data)
+                        if self._progress is not None:
+                            self._progress(done, total, 'hashing')
                 records.append(ContentChunkRecord(id=f'{cindex:08x}', cindex=cindex,
                                                   type=_UNENCRYPTED,
                                                   size=self._sizes[cindex], hash=content_hash.digest()))
@@ -361,27 +391,30 @@ def _dup_stream(f) -> 'BinaryIO':
     return fdopen(dup(f.fileno()), 'rb')
 
 
-def _reader_from_file(f):
+def _reader_from_file(f, progress=None):
     """Build a reader from an open, seekable file object."""
     kind = sniff_format(f)
     if kind == 'z3ds':
         # the inner file needs random access, so decompress to a temporary file
         tmp = TemporaryFile()
         with f:
-            decompress_z3ds(f, tmp)
-        return _reader_from_file(tmp)
+            decompress_z3ds(f, tmp, progress=progress)
+        return _reader_from_file(tmp, progress=progress)
     if kind == 'cia':
         return CIAReader(f)
     if kind == 'cci':
-        return TitleReader.from_cci(CCIReader(f))
+        return TitleReader.from_cci(CCIReader(f, load_contents=False), progress=progress)
     if kind == 'ncch':
-        ncch = NCCHReader(f)
-        return TitleReader.from_ncch(ncch, lambda: _dup_stream(f))
+        ncch = NCCHReader(f, load_sections=False)
+        return TitleReader.from_ncch(ncch, lambda: _dup_stream(f), progress=progress)
     raise UnsupportedFormatError('not a supported title format')
 
 
-def get_reader(path: 'Union[PathLike, bytes, str]'):
+def get_reader(path: 'Union[PathLike, bytes, str]', progress=None):
     """Read a title from a path, given any supported format.
+
+    progress, if given, is called as progress(done, total, stage) during
+    decompression and content hashing.
 
     Raises UnsupportedFormatError for known-but-unusable formats, and the pyctr
     errors (CIAError, CDNError, ...) for corrupt files, like the CIA path does.
@@ -393,26 +426,26 @@ def get_reader(path: 'Union[PathLike, bytes, str]'):
         kind = sniff_format(f)
 
     if kind == 'z3ds':
-        return _reader_from_file(open(path, 'rb'))
+        return _reader_from_file(open(path, 'rb'), progress=progress)
 
     if kind == 'cci':
         try:
-            cci = CCIReader(path)
+            cci = CCIReader(path, load_contents=False)
         except (MissingSeedError, NCCHSeedError):
             # let seed errors through untouched so the caller can show a useful message
             raise
         except (CCIError, NCCHError) as e:
             raise UnsupportedFormatError(f'could not read CCI: {e}') from e
-        return TitleReader.from_cci(cci)
+        return TitleReader.from_cci(cci, progress=progress)
 
     if kind == 'ncch':
         try:
-            ncch = NCCHReader(open(path, 'rb'))
+            ncch = NCCHReader(open(path, 'rb'), load_sections=False)
         except (MissingSeedError, NCCHSeedError):
             raise
         except NCCHError as e:
             raise UnsupportedFormatError(f'could not read NCCH: {e}') from e
-        return TitleReader.from_ncch(ncch, lambda: open(path, 'rb'))
+        return TitleReader.from_ncch(ncch, lambda: open(path, 'rb'), progress=progress)
 
     # CIA, or something unrecognized that may be a TMD file
     try:

@@ -556,7 +556,19 @@ class CustomInstallGUI(ttk.Frame):
         if path in self.readers:
             return False, 'File already in list'
         try:
-            reader = CustomInstall.get_reader(path)
+            # report decompression/hashing progress to the console window,
+            # throttled to every 10%
+            last_pct = [0]
+
+            def add_progress(done, total, stage):
+                if not total:
+                    return
+                pct = int(done * 100 / total)
+                if done >= total or pct >= last_pct[0] + 10:
+                    last_pct[0] = pct
+                    self.log(f'{stage}: {pct}%')
+
+            reader = CustomInstall.get_reader(path, progress=add_progress)
         except (CIAError, CDNError, TitleMetadataError):
             return False, 'Failed to read as a title, probably corrupt'
         except UnsupportedFormatError as e:

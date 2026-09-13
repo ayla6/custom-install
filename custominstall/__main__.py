@@ -251,8 +251,8 @@ class CustomInstall:
         return hasher.digest()
 
     @staticmethod
-    def get_reader(path: 'Union[PathLike, bytes, str]'):
-        return get_title_reader(path)
+    def get_reader(path: 'Union[PathLike, bytes, str]', progress=None):
+        return get_title_reader(path, progress=progress)
 
     def prepare_titles(self, paths: 'List[PathLike]'):
         if self.seeddb:
@@ -261,8 +261,13 @@ class CustomInstall:
         readers = []
         for path in paths:
             self.log(f'Reading {path}')
+
+            def read_progress(done, total, stage):
+                if total:
+                    self.event.update_percentage((done / total) * 100, done / 1048576, total / 1048576)
+
             try:
-                reader = self.get_reader(path)
+                reader = self.get_reader(path, progress=read_progress)
             except (CIAError, CDNError, TitleMetadataError):
                 self.log(f"Couldn't read {path}, likely corrupt or not a supported title")
                 continue
