@@ -47,6 +47,12 @@ Z3DS_MAGIC = b'Z3DS'
 # content type flags with every flag unset, for the unencrypted synthetic contents
 _UNENCRYPTED = ContentTypeFlags(False, False, False, False, False)
 
+# RSA-2048-SHA-256 with a zeroed signature body. Every CCI to CIA converter writes
+# the TMD signature like this; the console treats an all-zero signature as
+# "unsigned" and skips verification, but a non-zero one (such as pyctr's
+# BLANK_SIG_PAIR of 0xFF bytes) gets verified and rejected, breaking the title.
+_BLANK_SIGNATURE = (0x00010004, b'\x00' * 0x100)
+
 # inner magics allowed inside a Z3DS file, mapped to what they are handled as
 _Z3DS_UNDERLYING = {b'NCSD': 'cci', b'NCCH': 'ncch', b'CIA\x00': 'cia'}
 
@@ -332,7 +338,8 @@ class TitleReader:
             chunk_records_raw = b''.join(bytes(r) for r in records)
             info_records = [ContentInfoRecord(index_offset=0, command_count=len(records),
                                               hash=sha256(chunk_records_raw).digest())]
-            self._tmd = TitleMetadataReader(title_id=self.title_id, save_size=self._save_size, srl_save_size=0,
+            self._tmd = TitleMetadataReader(signature=_BLANK_SIGNATURE,
+                                            title_id=self.title_id, save_size=self._save_size, srl_save_size=0,
                                             title_version=TitleVersion.from_int(0), info_records=info_records,
                                             chunk_records=records)
         return self._tmd
